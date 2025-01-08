@@ -12,6 +12,9 @@ local chain = arg[5] or "0"
 local chain_local_port = string.split(chain, "/")[2] or "0"
 
 local server = ucursor:get_all("shadowsocksr", server_section)
+local socks_server = ucursor:get_all("shadowsocksr", "@socks5_proxy[0]") or {}
+local xray_fragment = ucursor:get_all("shadowsocksr", "@global_xray_fragment[0]") or {}
+local xray_noise = ucursor:get_all("shadowsocksr", "@xray_noise_packets[0]") or {}
 local outbound_settings = nil
 
 function vmess_vless()
@@ -26,7 +29,7 @@ function vmess_vless()
 						alterId = (server.v2ray_protocol == "vmess" or not server.v2ray_protocol) and tonumber(server.alter_id) or nil,
 						security = (server.v2ray_protocol == "vmess" or not server.v2ray_protocol) and server.security or nil,
 						encryption = (server.v2ray_protocol == "vless") and server.vless_encryption or nil,
-						flow = ((server.xtls == '1') or (server.tls == '1') or (server.reality == '1')) and server.tls_flow or nil
+						flow = (((server.xtls == '1') or (server.tls == '1') or (server.reality == '1')) and server.tls_flow ~= "none") and server.tls_flow or nil
 					}
 				}
 			}
@@ -128,6 +131,8 @@ local Xray = {
 	-- 初始化 inbounds 表
 	inbounds = {},
 
+	-- 初始化 outbounds 表
+	outbounds = {},
 }
 	-- 传入连接
 	-- 添加 dokodemo-door 配置，如果 local_port 不为 0
@@ -176,10 +181,20 @@ end
 	-- 检查是否启用 socks 代理
 if proto:find("tcp") and socks_port ~= "0" then
     table.insert(Xray.inbounds, {
-	-- socks
+        -- socks
         protocol = "socks",
         port = tonumber(socks_port),
-        settings = {auth = "noauth", udp = true}
+        settings = {
+			auth = socks_server.socks5_auth,
+			udp = true,
+			mixed = (socks_server.socks5_mixed == '1') and true or false,
+			accounts = (socks_server.socks5_auth ~= "noauth") and {
+				{
+					user = socks_server.socks5_user,
+					pass = socks_server.socks5_pass
+				}
+			} or nil
+		}
     })
 end
 
@@ -216,15 +231,15 @@ end
 					fingerprint = server.fingerprint,
 					serverName = server.tls_host
 				} or nil,
-				tcpSettings = (server.transport == "tcp" and server.tcp_guise == "http") and {
+				rawSettings = (server.transport == "raw" or server.transport == "tcp") and {
 					-- tcp
 					header = {
-						type = server.tcp_guise,
-						request = {
+						type = server.tcp_guise or "none",
+						request = (server.tcp_guise == "http") and {
 							-- request
 							path = {server.http_path} or {"/"},
 							headers = {Host = {server.http_host} or {}}
-						}
+						} or nil
 					}
 				} or nil,
 				kcpSettings = (server.transport == "kcp") and {
@@ -241,10 +256,7 @@ end
 				} or nil,
 				wsSettings = (server.transport == "ws") and (server.ws_path or server.ws_host or server.tls_host) and {
 					-- ws
-					headers = (server.ws_host or server.tls_host) and {
-						-- headers
-						Host = server.ws_host or server.tls_host
-					} or nil,
+					Host = server.ws_host or server.tls_host or nil,
 					path = server.ws_path,
 					maxEarlyData = tonumber(server.ws_ed) or nil,
 					earlyDataHeaderName = server.ws_ed_header or nil
@@ -282,9 +294,11 @@ end
 					initial_windows_size = tonumber(server.initial_windows_size) or nil
 				} or nil,
 				sockopt = {
-					tcpMptcp = (server.mptcp == "1") and true or false, -- MPTCP
-					tcpNoDelay = (server.mptcp == "1") and true or false, -- MPTCP
-					tcpcongestion = server.custom_tcpcongestion -- 连接服务器节点的 TCP 拥塞控制算法
+					mark = 250,
+					tcpMptcp = (server.mptcp == "1") and true or nil, -- MPTCP
+					tcpNoDelay = (server.mptcp == "1") and true or nil, -- MPTCP
+					tcpcongestion = server.custom_tcpcongestion, -- 连接服务器节点的 TCP 拥塞控制算法
+					dialerProxy = (xray_fragment.fragment == "1" or xray_fragment.noise == "1") and "dialerproxy" or nil
 				}
 			} or nil,
 			mux = (server.v2ray_protocol ~= "wireguard") and {
@@ -296,6 +310,37 @@ end
 			} or nil
 		}
 	}
+
+-- 添加带有 fragment 设置的 dialerproxy 配置
+if xray_fragment.fragment ~= "0" or (xray_fragment.noise ~= "0" and xray_noise.enabled ~= "0") then
+	table.insert(Xray.outbounds, {
+		protocol = "freedom",
+		tag = "dialerproxy",
+		settings = {
+			domainStrategy = (xray_fragment.noise == "1" and xray_noise.enabled == "1") and xray_noise.domainStrategy,
+			fragment = (xray_fragment.fragment == "1") and {
+				packets = (xray_fragment.fragment_packets ~= "") and xray_fragment.fragment_packets or nil,
+				length = (xray_fragment.fragment_length ~= "") and xray_fragment.fragment_length or nil,
+				interval = (xray_fragment.fragment_interval ~= "") and xray_fragment.fragment_interval or nil
+			} or nil,
+			noises = (xray_fragment.noise == "1" and xray_noise.enabled == "1") and {
+				{
+					type = xray_noise.type,
+					packet = xray_noise.packet,
+					delay = xray_noise.delay:find("-") and xray_noise.delay or tonumber(xray_noise.delay)
+				}
+			} or nil
+		},
+		streamSettings = {
+			sockopt = {
+			mark = 250,
+			tcpMptcp = (server.mptcp == "1") and true or nil, -- MPTCP
+			tcpNoDelay = (server.mptcp == "1") and true or nil, -- MPTCP
+			tcpcongestion = server.custom_tcpcongestion -- 连接服务器节点的 TCP 拥塞控制算法
+			}
+		}
+	})
+end
 
 local cipher = "ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-AES256-SHA:ECDHE-ECDSA-AES128-SHA:ECDHE-RSA-AES128-SHA:ECDHE-RSA-AES256-SHA:DHE-RSA-AES128-SHA:DHE-RSA-AES256-SHA:AES128-SHA:AES256-SHA:DES-CBC3-SHA"
 local cipher13 = "TLS_AES_128_GCM_SHA256:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_256_GCM_SHA384"
